@@ -70,7 +70,11 @@ def load_data():
 df = load_data()
 
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/9/93/Amazon_Web_Services_Logo.svg", width=120)
+    logo_col1, logo_col2 = st.columns(2)
+    with logo_col1:
+        st.image("https://upload.wikimedia.org/wikipedia/commons/9/93/Amazon_Web_Services_Logo.svg", width=110)
+    with logo_col2:
+        st.image("attached_assets/oxya_new_logo_CMYK_site-web_1782063768056.png", width=110)
     st.markdown("## Navigation")
     page = st.radio(
         "Choisir une section",
