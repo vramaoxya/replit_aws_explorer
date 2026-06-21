@@ -3,6 +3,12 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import io
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from fpdf import FPDF
+from datetime import datetime
 
 st.set_page_config(
     page_title="Ressources AWS",
@@ -880,3 +886,363 @@ elif page == "🎯 Recommandations":
         width="stretch"
     )
     st.caption("Score Global = 35% Prix + 25% CPU + 20% RAM + 20% Performance. Les 3 premiers sont surlignés en jaune dans le tableau des recommandations.")
+
+    st.markdown("---")
+    st.subheader("📥 Exporter les résultats")
+    st.markdown("Téléchargez les recommandations dans le format de votre choix.")
+
+    export_df = top_reco[[
+        "Region Name", "Ec2Type", "OS", "CPU", "RAM",
+        "coût_horaire", "coût_mensuel", "coût_annuel", "économie_vs_od", "saps_norm"
+    ]].copy()
+    export_df.columns = [
+        "Région", "Type EC2", "OS", "vCPU", "RAM (Go)",
+        "Coût $/h", "Coût $/mois", "Coût $/an", "Économie vs OD (%)", "SAPS"
+    ]
+    export_df = export_df.reset_index(drop=True)
+    export_df.index = export_df.index + 1
+
+    score_export = score_table.copy()
+
+    def build_excel(reco_data, score_data, criteria):
+        wb = openpyxl.Workbook()
+
+        HDR_FILL = PatternFill("solid", fgColor="232F3E")
+        HDR_FONT = Font(bold=True, color="FFFFFF", size=11)
+        GOLD_FILL = PatternFill("solid", fgColor="FFF3CD")
+        GREEN_FILL = PatternFill("solid", fgColor="D4EDDA")
+        YELLOW_FILL = PatternFill("solid", fgColor="FFF3CD")
+        RED_FILL = PatternFill("solid", fgColor="F8D7DA")
+        BORDER = Border(
+            left=Side(style="thin", color="CCCCCC"),
+            right=Side(style="thin", color="CCCCCC"),
+            top=Side(style="thin", color="CCCCCC"),
+            bottom=Side(style="thin", color="CCCCCC"),
+        )
+        CENTER = Alignment(horizontal="center", vertical="center")
+        LEFT = Alignment(horizontal="left", vertical="center")
+
+        ws1 = wb.active
+        ws1.title = "Recommandations"
+
+        ws1.merge_cells("A1:J1")
+        title_cell = ws1["A1"]
+        title_cell.value = "☁️  Recommandations AWS EC2 — Ressources AWS"
+        title_cell.font = Font(bold=True, size=14, color="FFFFFF")
+        title_cell.fill = PatternFill("solid", fgColor="FF9900")
+        title_cell.alignment = CENTER
+        ws1.row_dimensions[1].height = 28
+
+        ws1.merge_cells("A2:J2")
+        sub_cell = ws1["A2"]
+        sub_cell.value = (
+            f"Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}  |  "
+            f"Budget : {criteria['budget']}  |  Engagement : {criteria['engagement']}  |  "
+            f"vCPU min : {criteria['cpu']}  |  RAM min : {criteria['ram']} Go  |  "
+            f"Priorité : {criteria['prio']}"
+        )
+        sub_cell.font = Font(italic=True, size=9, color="555555")
+        sub_cell.alignment = LEFT
+        ws1.row_dimensions[2].height = 18
+
+        headers = list(reco_data.columns)
+        for col_idx, hdr in enumerate(headers, start=1):
+            cell = ws1.cell(row=4, column=col_idx, value=hdr)
+            cell.font = HDR_FONT
+            cell.fill = HDR_FILL
+            cell.alignment = CENTER
+            cell.border = BORDER
+        ws1.row_dimensions[4].height = 20
+
+        money_fmt = '#,##0.0000 "$"'
+        money_mrr = '#,##0.00 "$"'
+        pct_fmt = '0.0"%"'
+
+        col_formats = {
+            "Coût $/h": money_fmt,
+            "Coût $/mois": money_mrr,
+            "Coût $/an": money_mrr,
+            "Économie vs OD (%)": pct_fmt,
+            "SAPS": '#,##0',
+            "vCPU": '0',
+            "RAM (Go)": '0',
+        }
+
+        for row_idx, row in reco_data.iterrows():
+            excel_row = row_idx + 4
+            row_fill = GOLD_FILL if row_idx <= 3 else PatternFill("solid", fgColor="FFFFFF" if row_idx % 2 else "F8F9FA")
+            for col_idx, (col_name, val) in enumerate(zip(headers, row), start=1):
+                cell = ws1.cell(row=excel_row, column=col_idx, value=val)
+                cell.fill = row_fill
+                cell.border = BORDER
+                cell.alignment = CENTER
+                fmt = col_formats.get(col_name)
+                if fmt:
+                    cell.number_format = fmt
+            ws1.row_dimensions[excel_row].height = 16
+
+        col_widths = [28, 18, 10, 8, 10, 14, 14, 14, 16, 10]
+        for i, w in enumerate(col_widths, start=1):
+            ws1.column_dimensions[get_column_letter(i)].width = w
+
+        ws2 = wb.create_sheet("Scores Multi-Critères")
+        ws2.merge_cells("A1:F1")
+        t2 = ws2["A1"]
+        t2.value = "Matrice de Décision Multi-Critères"
+        t2.font = Font(bold=True, size=13, color="FFFFFF")
+        t2.fill = PatternFill("solid", fgColor="232F3E")
+        t2.alignment = CENTER
+        ws2.row_dimensions[1].height = 24
+
+        score_headers = list(score_data.columns)
+        for col_idx, hdr in enumerate(score_headers, start=1):
+            cell = ws2.cell(row=3, column=col_idx, value=hdr)
+            cell.font = HDR_FONT
+            cell.fill = HDR_FILL
+            cell.alignment = CENTER
+            cell.border = BORDER
+        ws2.row_dimensions[3].height = 18
+
+        score_cols_num = ["Score Prix", "Score CPU", "Score RAM", "Score Perf.", "Score Global"]
+        for row_idx, row in score_data.iterrows():
+            excel_row = row_idx + 3
+            for col_idx, (col_name, val) in enumerate(zip(score_headers, row), start=1):
+                cell = ws2.cell(row=excel_row, column=col_idx, value=val)
+                cell.border = BORDER
+                cell.alignment = CENTER
+                if col_name in score_cols_num and isinstance(val, float):
+                    cell.number_format = "0.0"
+                    if val >= 75:
+                        cell.fill = GREEN_FILL
+                        cell.font = Font(color="155724")
+                    elif val >= 50:
+                        cell.fill = YELLOW_FILL
+                        cell.font = Font(color="856404")
+                    else:
+                        cell.fill = RED_FILL
+                        cell.font = Font(color="721C24")
+            ws2.row_dimensions[excel_row].height = 16
+
+        ws2.column_dimensions["A"].width = 40
+        for i in range(2, 7):
+            ws2.column_dimensions[get_column_letter(i)].width = 14
+
+        ws3 = wb.create_sheet("Glossaire")
+        ws3.merge_cells("A1:B1")
+        g1 = ws3["A1"]
+        g1.value = "Glossaire des indicateurs"
+        g1.font = Font(bold=True, size=12, color="FFFFFF")
+        g1.fill = PatternFill("solid", fgColor="FF9900")
+        g1.alignment = CENTER
+        ws3.row_dimensions[1].height = 22
+
+        glossaire = [
+            ("Coût $/h", "Coût horaire de l'instance selon le type d'engagement choisi"),
+            ("Coût $/mois", "Coût mensuel estimé sur 730 heures"),
+            ("Coût $/an", "Coût annuel estimé sur 8 760 heures"),
+            ("Économie vs OD (%)", "Pourcentage d'économie par rapport au tarif On-Demand"),
+            ("SAPS", "Standard Application Performance Standard — mesure de performance SAP"),
+            ("Score Prix", "Score normalisé 0–100 : 100 = moins cher de la sélection"),
+            ("Score CPU", "Score normalisé 0–100 : 100 = plus de vCPU de la sélection"),
+            ("Score RAM", "Score normalisé 0–100 : 100 = plus de RAM de la sélection"),
+            ("Score Perf.", "Score normalisé 0–100 basé sur les SAPS"),
+            ("Score Global", "35% Prix + 25% CPU + 20% RAM + 20% Performance"),
+        ]
+        for r, (terme, definition) in enumerate(glossaire, start=3):
+            c1 = ws3.cell(row=r, column=1, value=terme)
+            c1.font = Font(bold=True)
+            c1.border = BORDER
+            c1.fill = PatternFill("solid", fgColor="F2F2F2" if r % 2 else "FFFFFF")
+            c2 = ws3.cell(row=r, column=2, value=definition)
+            c2.border = BORDER
+            c2.fill = PatternFill("solid", fgColor="F2F2F2" if r % 2 else "FFFFFF")
+            ws3.row_dimensions[r].height = 15
+        ws3.column_dimensions["A"].width = 22
+        ws3.column_dimensions["B"].width = 65
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf.read()
+
+    class AWSPDF(FPDF):
+        def header(self):
+            self.set_fill_color(35, 47, 62)
+            self.rect(0, 0, 210, 18, "F")
+            self.set_font("Helvetica", "B", 13)
+            self.set_text_color(255, 153, 0)
+            self.set_xy(0, 3)
+            self.cell(0, 12, "  Ressources AWS — Recommandations EC2", align="L")
+            self.set_font("Helvetica", "", 8)
+            self.set_text_color(180, 180, 180)
+            self.set_xy(0, 3)
+            self.cell(0, 12, datetime.now().strftime("%d/%m/%Y  "), align="R")
+            self.ln(14)
+
+        def footer(self):
+            self.set_y(-12)
+            self.set_font("Helvetica", "I", 8)
+            self.set_text_color(150, 150, 150)
+            self.set_fill_color(245, 245, 245)
+            self.rect(0, self.get_y(), 210, 12, "F")
+            self.cell(0, 10, f"Page {self.page_no()} — Données AWS Pricing Avril 2026", align="C")
+
+    def build_pdf(reco_data, score_data, criteria):
+        pdf = AWSPDF()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_page()
+
+        pdf.set_font("Helvetica", "B", 16)
+        pdf.set_text_color(35, 47, 62)
+        pdf.cell(0, 10, "Rapport de Recommandations AWS EC2", ln=True, align="C")
+        pdf.ln(2)
+
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(80, 80, 80)
+        pdf.set_fill_color(255, 249, 230)
+        pdf.set_draw_color(255, 153, 0)
+        pdf.rect(10, pdf.get_y(), 190, 22, "FD")
+        pdf.set_xy(12, pdf.get_y() + 2)
+        pdf.multi_cell(186, 5,
+            f"Budget : {criteria['budget']}   |   Engagement : {criteria['engagement']}   |   "
+            f"vCPU min : {criteria['cpu']}   |   RAM min : {criteria['ram']} Go\n"
+            f"Priorité : {criteria['prio']}   |   Instances analysées : {criteria['total_filtered']:,}   |   "
+            f"Résultats affichés : {len(reco_data)}",
+            align="L"
+        )
+        pdf.ln(6)
+
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.set_text_color(35, 47, 62)
+        pdf.cell(0, 8, "Meilleures instances recommandées", ln=True)
+        pdf.ln(1)
+
+        col_widths = [40, 25, 18, 12, 14, 20, 22, 22]
+        col_names = ["Région", "Type EC2", "OS", "vCPU", "RAM (Go)", "$/h", "$/mois", "$/an"]
+
+        pdf.set_fill_color(35, 47, 62)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 8)
+        for w, name in zip(col_widths, col_names):
+            pdf.cell(w, 7, name, border=1, align="C", fill=True)
+        pdf.ln()
+
+        medals = {1: "1.", 2: "2.", 3: "3."}
+        for i, row in reco_data.iterrows():
+            pdf.set_font("Helvetica", "B" if i <= 3 else "", 7.5)
+            if i <= 3:
+                pdf.set_fill_color(255, 249, 230)
+                pdf.set_text_color(101, 68, 0)
+            else:
+                bg = 248 if i % 2 == 0 else 255
+                pdf.set_fill_color(bg, bg, bg)
+                pdf.set_text_color(40, 40, 40)
+            medal = medals.get(i, "")
+            vals = [
+                f"{medal} {row['Région']}"[:22],
+                str(row["Type EC2"]),
+                str(row["OS"]),
+                str(int(row["vCPU"])),
+                f"{row['RAM (Go)']} Go",
+                f"${row['Coût $/h']:.4f}",
+                f"${row['Coût $/mois']:,.2f}",
+                f"${row['Coût $/an']:,.2f}",
+            ]
+            for w, val in zip(col_widths, vals):
+                pdf.cell(w, 6, val, border=1, align="C", fill=True)
+            pdf.ln()
+
+        pdf.ln(8)
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.set_text_color(35, 47, 62)
+        pdf.cell(0, 8, "Matrice de Décision Multi-Critères", ln=True)
+        pdf.ln(1)
+
+        score_col_widths = [70, 22, 22, 22, 22, 22]
+        score_col_names = ["Instance / Région", "Prix", "CPU", "RAM", "Perf.", "Global"]
+
+        pdf.set_fill_color(35, 47, 62)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 8)
+        for w, name in zip(score_col_widths, score_col_names):
+            pdf.cell(w, 7, name, border=1, align="C", fill=True)
+        pdf.ln()
+
+        for _, row in score_data.iterrows():
+            glob = row.get("Score Global", 0)
+            if glob >= 75:
+                pdf.set_fill_color(212, 237, 218)
+                pdf.set_text_color(21, 87, 36)
+            elif glob >= 50:
+                pdf.set_fill_color(255, 243, 205)
+                pdf.set_text_color(133, 100, 4)
+            else:
+                pdf.set_fill_color(248, 215, 218)
+                pdf.set_text_color(114, 28, 36)
+            pdf.set_font("Helvetica", "", 7.5)
+            scores = [
+                str(row.get("Instance / Région", ""))[:35],
+                f"{row.get('Score Prix', 0):.1f}",
+                f"{row.get('Score CPU', 0):.1f}",
+                f"{row.get('Score RAM', 0):.1f}",
+                f"{row.get('Score Perf.', 0):.1f}",
+                f"{glob:.1f}",
+            ]
+            for w, val in zip(score_col_widths, scores):
+                pdf.cell(w, 6, val, border=1, align="C", fill=True)
+            pdf.ln()
+
+        pdf.ln(8)
+        pdf.set_font("Helvetica", "I", 8)
+        pdf.set_text_color(100, 100, 100)
+        pdf.multi_cell(0, 5,
+            "Score Global = 35% Prix + 25% vCPU + 20% RAM + 20% Performance (SAPS). "
+            "Scores normalisés sur 100 par rapport à la sélection affichée. "
+            "Les 3 premières lignes du tableau des recommandations correspondent aux meilleures instances selon vos critères.",
+            align="L"
+        )
+
+        return bytes(pdf.output())
+
+    criteria_info = {
+        "budget": f"{budget_val:,.2f} {budget_type}",
+        "engagement": engagement,
+        "cpu": min_cpu,
+        "ram": min_ram,
+        "prio": prioritize,
+        "total_filtered": len(reco_df),
+    }
+
+    col_ex1, col_ex2, col_ex3 = st.columns([1, 1, 2])
+
+    with col_ex1:
+        with st.spinner("Préparation de l'Excel..."):
+            excel_bytes = build_excel(export_df, score_table, criteria_info)
+        fname_xlsx = f"recommandations_aws_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        st.download_button(
+            label="📊 Télécharger Excel (.xlsx)",
+            data=excel_bytes,
+            file_name=fname_xlsx,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+        st.caption("3 onglets : Recommandations · Scores · Glossaire")
+
+    with col_ex2:
+        with st.spinner("Préparation du PDF..."):
+            pdf_bytes = build_pdf(export_df, score_table, criteria_info)
+        fname_pdf = f"recommandations_aws_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+        st.download_button(
+            label="📄 Télécharger PDF (.pdf)",
+            data=pdf_bytes,
+            file_name=fname_pdf,
+            mime="application/pdf",
+            use_container_width=True,
+        )
+        st.caption("Rapport formaté prêt à partager")
+
+    with col_ex3:
+        st.info(
+            "💡 **Astuce** : modifiez vos critères en haut de page, "
+            "les exports se mettent à jour automatiquement avec les nouvelles recommandations."
+        )
