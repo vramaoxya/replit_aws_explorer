@@ -73,6 +73,7 @@ with st.sidebar:
             "💻 Ressources EC2",
             "📊 Analyse coûts EC2",
             "🗄️ Coûts S3 & EBS",
+            "🎯 Recommandations",
         ],
         label_visibility="collapsed"
     )
@@ -600,3 +601,282 @@ elif page == "🗄️ Coûts S3 & EBS":
         "Snapshot ($/Go/m)","S3 <50TB ($/Go/m)","S3 <500TB ($/Go/m)","S3 >500TB ($/Go/m)","Glacier ($/Go/m)"
     ]
     st.dataframe(display_storage, width="stretch", hide_index=True)
+
+
+elif page == "🎯 Recommandations":
+    st.title("🎯 Recommandations Intelligentes")
+    st.markdown("Obtenez les meilleures instances EC2 et régions selon votre budget et vos besoins techniques.")
+    st.markdown("---")
+
+    st.subheader("⚙️ Définissez vos critères")
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.markdown("**💰 Budget**")
+        budget_type = st.selectbox("Type de budget", ["Mensuel ($)", "Annuel ($)", "Horaire ($)"], key="reco_budget_type")
+        budget_val = st.number_input("Montant", min_value=0.01, value=500.0, step=50.0, key="reco_budget_val")
+        engagement = st.selectbox(
+            "Type d'engagement",
+            ["On-Demand (PayAsYouGo)", "Reserved 1 an", "Reserved 3 ans", "Savings Plan (~1 an)"],
+            key="reco_engagement"
+        )
+    with col_b:
+        st.markdown("**🖥️ Ressources**")
+        min_cpu = st.number_input("vCPU minimum", min_value=1, max_value=512, value=4, key="reco_cpu")
+        min_ram = st.number_input("RAM minimum (Go)", min_value=1, max_value=4096, value=16, key="reco_ram")
+        sel_os_reco = st.selectbox("Système d'exploitation", ["Tous"] + sorted(df["OS"].dropna().unique().tolist()), key="reco_os")
+    with col_c:
+        st.markdown("**🌍 Localisation**")
+        pref_regions = st.multiselect(
+            "Régions préférées (laisser vide = toutes)",
+            options=sorted(df["Region Name"].unique()),
+            default=[],
+            key="reco_regions"
+        )
+        max_results = st.slider("Nombre de recommandations", 3, 20, 10, key="reco_max")
+        prioritize = st.radio("Optimiser par", ["Meilleur rapport qualité/prix", "Plus économique", "Plus performant (SAPS)"], key="reco_prio")
+
+    cost_col_map = {
+        "On-Demand (PayAsYouGo)": "ODH",
+        "Reserved 1 an": "CostH1yr",
+        "Reserved 3 ans": "CostH3yr",
+        "Savings Plan (~1 an)": "SavingsPlanH",
+    }
+    cost_col = cost_col_map[engagement]
+
+    if budget_type == "Mensuel ($)":
+        max_hourly = budget_val / 730
+    elif budget_type == "Annuel ($)":
+        max_hourly = budget_val / 8760
+    else:
+        max_hourly = budget_val
+
+    reco_df = df.copy()
+    if pref_regions:
+        reco_df = reco_df[reco_df["Region Name"].isin(pref_regions)]
+    if sel_os_reco != "Tous":
+        reco_df = reco_df[reco_df["OS"] == sel_os_reco]
+    reco_df = reco_df[reco_df["CPU"] >= min_cpu]
+    reco_df = reco_df[reco_df["RAM"] >= min_ram]
+    reco_df = reco_df[reco_df[cost_col].notna() & (reco_df[cost_col] <= max_hourly)]
+
+    if reco_df.empty:
+        st.warning("⚠️ Aucune instance ne correspond à vos critères. Essayez d'augmenter le budget ou de réduire les exigences CPU/RAM.")
+        st.stop()
+
+    reco_df = reco_df.copy()
+    reco_df["coût_horaire"] = reco_df[cost_col]
+    reco_df["coût_mensuel"] = reco_df[cost_col] * 730
+    reco_df["coût_annuel"] = reco_df[cost_col] * 8760
+    reco_df["saps_norm"] = reco_df["SAPS"].fillna(0)
+    reco_df["score_qp"] = (reco_df["saps_norm"] / (reco_df["coût_horaire"] + 0.001)).fillna(0)
+    reco_df["économie_vs_od"] = ((1 - reco_df[cost_col] / reco_df["ODH"]) * 100).round(1)
+
+    if prioritize == "Meilleur rapport qualité/prix":
+        reco_df = reco_df.sort_values("score_qp", ascending=False)
+    elif prioritize == "Plus économique":
+        reco_df = reco_df.sort_values("coût_horaire", ascending=True)
+    else:
+        reco_df = reco_df.sort_values("saps_norm", ascending=False)
+
+    top_reco = reco_df.head(max_results).reset_index(drop=True)
+
+    st.markdown("---")
+    st.subheader(f"🏆 Top {len(top_reco)} recommandations")
+
+    budget_monthly = budget_val if budget_type == "Mensuel ($)" else (budget_val / 12 if budget_type == "Annuel ($)" else budget_val * 730)
+    c_info1, c_info2, c_info3, c_info4 = st.columns(4)
+    with c_info1:
+        st.metric("Budget horaire max", f"${max_hourly:.4f}")
+    with c_info2:
+        st.metric("Budget mensuel équivalent", f"${budget_monthly:,.2f}")
+    with c_info3:
+        st.metric("Instances filtrées", f"{len(reco_df):,}")
+    with c_info4:
+        best_price = top_reco["coût_horaire"].min()
+        st.metric("Meilleur prix trouvé", f"${best_price:.4f}/h")
+
+    st.markdown("---")
+
+    for i, row in top_reco.head(3).iterrows():
+        flag = REGION_FLAGS.get(row.get("Region Code", ""), "🌐")
+        medal = ["🥇", "🥈", "🥉"][i]
+        econ = row["économie_vs_od"]
+        econ_str = f"−{econ:.1f}% vs On-Demand" if econ > 0 else "Tarif On-Demand"
+        with st.container():
+            st.markdown(f"### {medal} {row['Ec2Type']} — {flag} {row['Region Name']}")
+            col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
+            with col_m1:
+                st.metric("Coût horaire", f"${row['coût_horaire']:.4f}")
+            with col_m2:
+                st.metric("Coût mensuel", f"${row['coût_mensuel']:,.2f}")
+            with col_m3:
+                st.metric("vCPU", int(row["CPU"]))
+            with col_m4:
+                st.metric("RAM", f"{row['RAM']} Go")
+            with col_m5:
+                st.metric("Économie", econ_str)
+            saps_val = int(row["saps_norm"]) if row["saps_norm"] > 0 else "N/A"
+            st.caption(f"OS : {row['OS']} · SAPS : {saps_val} · Engagement : {engagement}")
+            st.markdown("---")
+
+    st.subheader("📊 Comparaison visuelle des recommandations")
+    tab_chart1, tab_chart2, tab_chart3 = st.tabs(["💰 Coûts", "🔥 Performance vs Prix", "🌍 Par région"])
+
+    with tab_chart1:
+        chart_df = top_reco[["Ec2Type","Region Name","coût_mensuel","coût_annuel","CPU","RAM"]].copy()
+        chart_df["Label"] = chart_df["Ec2Type"] + "\n" + chart_df["Region Name"]
+        fig_bar_reco = px.bar(
+            chart_df,
+            x="Label",
+            y="coût_mensuel",
+            color="Region Name",
+            title="Coût mensuel des instances recommandées",
+            labels={"coût_mensuel": "Coût mensuel ($)", "Label": "Instance"},
+            color_discrete_sequence=px.colors.qualitative.Set2,
+            text_auto=".2f"
+        )
+        fig_bar_reco.update_traces(texttemplate="$%{y:.2f}", textposition="outside")
+        fig_bar_reco.update_layout(height=450, xaxis_tickangle=-30, showlegend=True)
+        if max_hourly * 730 > 0:
+            fig_bar_reco.add_hline(y=budget_monthly, line_dash="dash", line_color="red",
+                                   annotation_text=f"Budget: ${budget_monthly:,.0f}", annotation_position="top right")
+        st.plotly_chart(fig_bar_reco, width="stretch")
+
+    with tab_chart2:
+        scatter_reco = top_reco[top_reco["saps_norm"] > 0].copy()
+        if not scatter_reco.empty:
+            fig_sc = px.scatter(
+                scatter_reco,
+                x="coût_horaire",
+                y="saps_norm",
+                size="RAM",
+                color="Region Name",
+                text="Ec2Type",
+                title="Performance (SAPS) vs Coût horaire",
+                labels={"coût_horaire": "Coût $/h", "saps_norm": "SAPS (performance)", "RAM": "RAM (Go)"},
+                color_discrete_sequence=px.colors.qualitative.Bold
+            )
+            fig_sc.update_traces(textposition="top center")
+            fig_sc.update_layout(height=500)
+            st.plotly_chart(fig_sc, width="stretch")
+            st.caption("Les instances en haut à gauche offrent le meilleur rapport performance/prix.")
+        else:
+            st.info("Données SAPS non disponibles pour les instances sélectionnées.")
+
+    with tab_chart3:
+        region_reco = top_reco.groupby("Region Name").agg(
+            nb_instances=("Ec2Type", "count"),
+            coût_min=("coût_mensuel", "min"),
+            coût_moy=("coût_mensuel", "mean"),
+            coût_max=("coût_mensuel", "max"),
+        ).reset_index()
+        fig_reg = px.bar(
+            region_reco,
+            x="Region Name",
+            y=["coût_min", "coût_moy", "coût_max"],
+            barmode="group",
+            title="Coûts mensuels min / moyen / max par région (recommandations)",
+            labels={"value": "Coût mensuel ($)", "Region Name": "Région", "variable": "Indicateur"},
+            color_discrete_map={"coût_min": "#00CC96", "coût_moy": "#636EFA", "coût_max": "#EF553B"}
+        )
+        newnames = {"coût_min": "Minimum", "coût_moy": "Moyen", "coût_max": "Maximum"}
+        fig_reg.for_each_trace(lambda t: t.update(name=newnames.get(t.name, t.name)))
+        fig_reg.update_layout(height=400, xaxis_tickangle=-30)
+        st.plotly_chart(fig_reg, width="stretch")
+
+    st.markdown("---")
+    st.subheader("📋 Tableau complet des recommandations")
+    table_cols = ["Region Name", "Ec2Type", "OS", "CPU", "RAM", "coût_horaire", "coût_mensuel", "coût_annuel", "économie_vs_od", "saps_norm"]
+    available_table_cols = [c for c in table_cols if c in top_reco.columns]
+    display_reco = top_reco[available_table_cols].copy()
+    display_reco.columns = ["Région", "Type EC2", "OS", "vCPU", "RAM (Go)", "$/h", "$/mois", "$/an", "Économie (%)", "SAPS"][:len(available_table_cols)]
+    display_reco = display_reco.reset_index(drop=True)
+    display_reco.index = display_reco.index + 1
+
+    def highlight_top3(row):
+        if row.name <= 3:
+            return ["background-color: #fffbcc"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(
+        display_reco.style.apply(highlight_top3, axis=1).format({
+            "$/h": "${:.4f}",
+            "$/mois": "${:,.2f}",
+            "$/an": "${:,.2f}",
+            "Économie (%)": "{:.1f}%",
+        }, na_rep="N/A"),
+        width="stretch"
+    )
+
+    st.markdown("---")
+    st.subheader("📦 Matrice de décision multi-critères")
+    st.markdown("Score composite normalisé (0–100) tenant compte du prix, des ressources et des performances.")
+
+    score_df = top_reco.copy()
+    max_saps = score_df["saps_norm"].max() or 1
+    max_cpu = score_df["CPU"].max() or 1
+    max_ram = score_df["RAM"].max() or 1
+    min_cost = score_df["coût_horaire"].min() or 0.0001
+
+    score_df["score_prix"] = (min_cost / score_df["coût_horaire"] * 100).clip(0, 100)
+    score_df["score_cpu"] = (score_df["CPU"] / max_cpu * 100).clip(0, 100)
+    score_df["score_ram"] = (score_df["RAM"] / max_ram * 100).clip(0, 100)
+    score_df["score_perf"] = (score_df["saps_norm"] / max_saps * 100).clip(0, 100)
+    score_df["score_global"] = (
+        score_df["score_prix"] * 0.35 +
+        score_df["score_cpu"] * 0.25 +
+        score_df["score_ram"] * 0.20 +
+        score_df["score_perf"] * 0.20
+    ).round(1)
+    score_df["Label"] = score_df["Ec2Type"] + " / " + score_df["Region Name"].str.split("(").str[0].str.strip()
+
+    fig_radar_list = []
+    categories = ["Prix", "vCPU", "RAM", "Performance"]
+    for _, row_r in score_df.head(5).iterrows():
+        fig_radar_list.append({
+            "name": row_r["Label"],
+            "values": [row_r["score_prix"], row_r["score_cpu"], row_r["score_ram"], row_r["score_perf"]]
+        })
+
+    fig_radar = go.Figure()
+    colors_radar = px.colors.qualitative.Set2
+    for idx, item in enumerate(fig_radar_list):
+        vals = item["values"] + [item["values"][0]]
+        cats = categories + [categories[0]]
+        fig_radar.add_trace(go.Scatterpolar(
+            r=vals,
+            theta=cats,
+            fill="toself",
+            name=item["name"],
+            line_color=colors_radar[idx % len(colors_radar)],
+            opacity=0.7
+        ))
+    fig_radar.update_layout(
+        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+        title="Radar multi-critères des 5 meilleures instances",
+        height=500,
+        showlegend=True
+    )
+    st.plotly_chart(fig_radar, width="stretch")
+
+    score_table = score_df[["Label", "score_prix", "score_cpu", "score_ram", "score_perf", "score_global"]].copy()
+    score_table.columns = ["Instance / Région", "Score Prix", "Score CPU", "Score RAM", "Score Perf.", "Score Global"]
+    score_table = score_table.sort_values("Score Global", ascending=False).reset_index(drop=True)
+    score_table.index = score_table.index + 1
+
+    def color_score(val):
+        if isinstance(val, float):
+            if val >= 75:
+                return "background-color: #d4edda; color: #155724"
+            elif val >= 50:
+                return "background-color: #fff3cd; color: #856404"
+            else:
+                return "background-color: #f8d7da; color: #721c24"
+        return ""
+
+    st.dataframe(
+        score_table.style.applymap(color_score, subset=["Score Prix", "Score CPU", "Score RAM", "Score Perf.", "Score Global"])
+                         .format("{:.1f}", subset=["Score Prix", "Score CPU", "Score RAM", "Score Perf.", "Score Global"]),
+        width="stretch"
+    )
+    st.caption("Score Global = 35% Prix + 25% CPU + 20% RAM + 20% Performance. Les 3 premiers sont surlignés en jaune dans le tableau des recommandations.")
