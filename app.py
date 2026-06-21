@@ -80,6 +80,7 @@ with st.sidebar:
             "📊 Analyse coûts EC2",
             "🗄️ Coûts S3 & EBS",
             "🎯 Recommandations",
+            "⚖️ Comparaison TCO",
         ],
         label_visibility="collapsed"
     )
@@ -1246,3 +1247,459 @@ elif page == "🎯 Recommandations":
             "💡 **Astuce** : modifiez vos critères en haut de page, "
             "les exports se mettent à jour automatiquement avec les nouvelles recommandations."
         )
+
+
+elif page == "⚖️ Comparaison TCO":
+    st.title("⚖️ Comparaison & TCO")
+    st.markdown("Comparez deux instances EC2 côte à côte et estimez leur Coût Total de Possession (TCO) sur 1, 2 et 3 ans.")
+    st.markdown("---")
+
+    all_types = sorted(df["Ec2Type"].dropna().unique())
+    all_regions = sorted(df["Region Name"].dropna().unique())
+
+    st.subheader("🔍 Sélectionnez les deux instances à comparer")
+    col_l, col_sep, col_r = st.columns([5, 1, 5])
+
+    with col_l:
+        st.markdown("#### Instance A")
+        reg_a = st.selectbox("Région A", all_regions, index=0, key="tco_reg_a")
+        os_opts_a = sorted(df[df["Region Name"] == reg_a]["OS"].dropna().unique())
+        os_a = st.selectbox("OS A", os_opts_a, key="tco_os_a")
+        types_a = sorted(df[(df["Region Name"] == reg_a) & (df["OS"] == os_a)]["Ec2Type"].dropna().unique())
+        type_a = st.selectbox("Type EC2 A", types_a, key="tco_type_a")
+
+    with col_sep:
+        st.markdown("<div style='text-align:center; font-size:2.5rem; margin-top:4rem;'>⚡</div>", unsafe_allow_html=True)
+
+    with col_r:
+        st.markdown("#### Instance B")
+        reg_b = st.selectbox("Région B", all_regions, index=min(1, len(all_regions)-1), key="tco_reg_b")
+        os_opts_b = sorted(df[df["Region Name"] == reg_b]["OS"].dropna().unique())
+        os_b = st.selectbox("OS B", os_opts_b, key="tco_os_b")
+        types_b = sorted(df[(df["Region Name"] == reg_b) & (df["OS"] == os_b)]["Ec2Type"].dropna().unique())
+        type_b = st.selectbox("Type EC2 B", types_b, key="tco_type_b")
+
+    st.markdown("---")
+    st.subheader("⚙️ Paramètres TCO")
+    col_p1, col_p2, col_p3 = st.columns(3)
+    with col_p1:
+        nb_instances = st.number_input("Nombre d'instances", min_value=1, max_value=10000, value=5, key="tco_nb")
+        usage_pct = st.slider("Taux d'utilisation (%)", 10, 100, 100, 5, key="tco_usage",
+                              help="100% = instance allumée 24h/24. 50% = allumée 12h/jour en moyenne.")
+    with col_p2:
+        ebs_vol_gb = st.number_input("Volume EBS gp3 par instance (Go)", min_value=0, value=100, step=50, key="tco_ebs")
+        s3_vol_tb = st.number_input("Volume S3 total (To)", min_value=0.0, value=5.0, step=1.0, key="tco_s3")
+    with col_p3:
+        engagement = st.selectbox(
+            "Engagement tarifaire",
+            ["On-Demand (PayAsYouGo)", "Reserved 1 an", "Reserved 3 ans", "Savings Plan (~1 an)"],
+            key="tco_engagement"
+        )
+        transfer_gb = st.number_input("Transfert sortant mensuel (Go)", min_value=0, value=100, step=50, key="tco_transfer",
+                                      help="Données transférées hors AWS (~0.09$/Go en Europe)")
+
+    cost_col_map = {
+        "On-Demand (PayAsYouGo)": "ODH",
+        "Reserved 1 an": "CostH1yr",
+        "Reserved 3 ans": "CostH3yr",
+        "Savings Plan (~1 an)": "SavingsPlanH",
+    }
+    cost_col = cost_col_map[engagement]
+
+    row_a = df[(df["Region Name"] == reg_a) & (df["OS"] == os_a) & (df["Ec2Type"] == type_a)]
+    row_b = df[(df["Region Name"] == reg_b) & (df["OS"] == os_b) & (df["Ec2Type"] == type_b)]
+
+    if row_a.empty or row_b.empty:
+        st.warning("Instance introuvable. Vérifiez vos sélections.")
+        st.stop()
+
+    ra = row_a.iloc[0]
+    rb = row_b.iloc[0]
+
+    TRANSFER_COST = 0.09
+    hours_per_year = 8760 * (usage_pct / 100)
+    hours_per_month = 730 * (usage_pct / 100)
+
+    def tco_for(row, years):
+        ec2_h = (row.get(cost_col) or 0) * hours_per_year * years * nb_instances
+        ebs_gp3 = (row.get("gp3G/M") or 0) * ebs_vol_gb * nb_instances * 12 * years
+        s3_gb = s3_vol_tb * 1024
+        s3_cost_m = s3_gb * (row.get("s3<50T") or 0) if s3_gb <= 50*1024 else (
+            50*1024*(row.get("s3<50T") or 0) + (s3_gb - 50*1024)*(row.get("s3<450T") or 0)
+        )
+        s3_total = s3_cost_m * 12 * years
+        transfer_total = transfer_gb * TRANSFER_COST * 12 * years
+        total = ec2_h + ebs_gp3 + s3_total + transfer_total
+        return {
+            "ec2": ec2_h,
+            "ebs": ebs_gp3,
+            "s3": s3_total,
+            "transfer": transfer_total,
+            "total": total,
+        }
+
+    tco_a1 = tco_for(ra, 1); tco_a2 = tco_for(ra, 2); tco_a3 = tco_for(ra, 3)
+    tco_b1 = tco_for(rb, 1); tco_b2 = tco_for(rb, 2); tco_b3 = tco_for(rb, 3)
+
+    # ── Fiches récapitulatives ─────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📋 Fiches récapitulatives")
+    card_a, card_sep2, card_b = st.columns([5, 1, 5])
+
+    def render_card(row, label, tco1, tco2, tco3, cost_col):
+        flag = REGION_FLAGS.get(row.get("Region Code", ""), "🌐")
+        od = row.get("ODH") or 0
+        cph = row.get(cost_col) or 0
+        saving = (1 - cph / od) * 100 if od > 0 else 0
+        st.markdown(f"### {label}")
+        st.markdown(f"**{flag} {row['Region Name']}** · `{row['Ec2Type']}` · {row['OS']}")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("vCPU", int(row["CPU"]) if pd.notna(row["CPU"]) else "—")
+        m2.metric("RAM", f"{row['RAM']} Go" if pd.notna(row["RAM"]) else "—")
+        m3.metric("SAPS", f"{int(row['SAPS']):,}" if pd.notna(row.get("SAPS")) and row.get("SAPS", 0) > 0 else "N/A")
+        n1, n2, n3 = st.columns(3)
+        n1.metric("$/h", f"${cph:.4f}")
+        n2.metric("$/mois", f"${cph*730:,.2f}")
+        n3.metric("Économie vs OD", f"{saving:.1f}%")
+        st.markdown(f"**TCO ({nb_instances} inst. · {usage_pct}% utilisation)**")
+        t1, t2, t3 = st.columns(3)
+        t1.metric("1 an", f"${tco1['total']:,.0f}")
+        t2.metric("2 ans", f"${tco2['total']:,.0f}")
+        t3.metric("3 ans", f"${tco3['total']:,.0f}")
+
+    with card_a:
+        render_card(ra, "🅰 Instance A", tco_a1, tco_a2, tco_a3, cost_col)
+    with card_sep2:
+        st.markdown("")
+    with card_b:
+        render_card(rb, "🅱 Instance B", tco_b1, tco_b2, tco_b3, cost_col)
+
+    # ── Gagnant ────────────────────────────────────────────────────────────
+    st.markdown("---")
+    winner_1 = "A" if tco_a1["total"] <= tco_b1["total"] else "B"
+    winner_3 = "A" if tco_a3["total"] <= tco_b3["total"] else "B"
+    diff_1 = abs(tco_a1["total"] - tco_b1["total"])
+    diff_3 = abs(tco_a3["total"] - tco_b3["total"])
+    pct_1 = diff_1 / max(tco_a1["total"], tco_b1["total"]) * 100
+    pct_3 = diff_3 / max(tco_a3["total"], tco_b3["total"]) * 100
+
+    col_w1, col_w2 = st.columns(2)
+    with col_w1:
+        icon = "🅰" if winner_1 == "A" else "🅱"
+        st.success(f"**Gagnant à 1 an : Instance {winner_1} {icon}**  \n"
+                   f"Économie de **${diff_1:,.0f}** ({pct_1:.1f}% moins cher)")
+    with col_w2:
+        icon = "🅰" if winner_3 == "A" else "🅱"
+        st.success(f"**Gagnant à 3 ans : Instance {winner_3} {icon}**  \n"
+                   f"Économie de **${diff_3:,.0f}** ({pct_3:.1f}% moins cher)")
+
+    # ── Graphiques ─────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📊 Visualisations comparatives")
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 TCO cumulé", "🧩 Répartition des coûts", "📊 Comparaison specs", "💹 Seuil de rentabilité"])
+
+    with tab1:
+        months = list(range(1, 37))
+        tco_a_monthly = [tco_for(ra, m/12)["total"] for m in months]
+        tco_b_monthly = [tco_for(rb, m/12)["total"] for m in months]
+
+        fig_cum = go.Figure()
+        fig_cum.add_trace(go.Scatter(
+            x=months, y=tco_a_monthly,
+            mode="lines+markers", name=f"Instance A — {type_a}",
+            line=dict(color="#636EFA", width=2.5),
+            marker=dict(size=4),
+        ))
+        fig_cum.add_trace(go.Scatter(
+            x=months, y=tco_b_monthly,
+            mode="lines+markers", name=f"Instance B — {type_b}",
+            line=dict(color="#EF553B", width=2.5),
+            marker=dict(size=4),
+        ))
+        for yr_m, label in [(12, "1 an"), (24, "2 ans"), (36, "3 ans")]:
+            fig_cum.add_vline(x=yr_m, line_dash="dot", line_color="gray",
+                              annotation_text=label, annotation_position="top right")
+        fig_cum.update_layout(
+            title=f"TCO cumulé sur 36 mois — {nb_instances} instance(s) · {usage_pct}% utilisation",
+            xaxis_title="Mois", yaxis_title="Coût cumulé ($)",
+            height=450, hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_cum, width="stretch")
+
+    with tab2:
+        composants = ["EC2", "EBS", "S3", "Transfert"]
+        vals_a3 = [tco_a3["ec2"], tco_a3["ebs"], tco_a3["s3"], tco_a3["transfer"]]
+        vals_b3 = [tco_b3["ec2"], tco_b3["ebs"], tco_b3["s3"], tco_b3["transfer"]]
+
+        fig_pie2 = make_subplots(rows=1, cols=2, specs=[[{"type":"pie"}, {"type":"pie"}]],
+                                 subplot_titles=[f"Instance A — {type_a}", f"Instance B — {type_b}"])
+        palette = px.colors.qualitative.Set2
+        non_zero_a = [(c, v) for c, v in zip(composants, vals_a3) if v > 0]
+        non_zero_b = [(c, v) for c, v in zip(composants, vals_b3) if v > 0]
+
+        fig_pie2.add_trace(go.Pie(
+            labels=[c for c, _ in non_zero_a], values=[v for _, v in non_zero_a],
+            hole=0.42, marker_colors=palette,
+            textinfo="label+percent", hovertemplate="<b>%{label}</b><br>$%{value:,.0f}<extra></extra>"
+        ), row=1, col=1)
+        fig_pie2.add_trace(go.Pie(
+            labels=[c for c, _ in non_zero_b], values=[v for _, v in non_zero_b],
+            hole=0.42, marker_colors=palette,
+            textinfo="label+percent", hovertemplate="<b>%{label}</b><br>$%{value:,.0f}<extra></extra>"
+        ), row=1, col=2)
+        fig_pie2.update_layout(title="Répartition du TCO sur 3 ans par composant", height=400,
+                               legend=dict(orientation="h"))
+        st.plotly_chart(fig_pie2, width="stretch")
+
+        bar_data = pd.DataFrame({
+            "Composant": composants * 2,
+            "Instance": [f"A — {type_a}"] * 4 + [f"B — {type_b}"] * 4,
+            "Coût ($)": vals_a3 + vals_b3,
+        })
+        fig_bar_comp = px.bar(bar_data, x="Composant", y="Coût ($)", color="Instance",
+                              barmode="group", title="Détail des coûts TCO 3 ans par composant",
+                              color_discrete_sequence=["#636EFA", "#EF553B"])
+        fig_bar_comp.update_layout(height=380)
+        st.plotly_chart(fig_bar_comp, width="stretch")
+
+    with tab3:
+        specs_labels = ["vCPU", "RAM (Go)", "SAPS"]
+        specs_a = [
+            float(ra["CPU"]) if pd.notna(ra.get("CPU")) else 0,
+            float(ra["RAM"]) if pd.notna(ra.get("RAM")) else 0,
+            float(ra["SAPS"]) if pd.notna(ra.get("SAPS")) and ra.get("SAPS", 0) > 0 else 0,
+        ]
+        specs_b = [
+            float(rb["CPU"]) if pd.notna(rb.get("CPU")) else 0,
+            float(rb["RAM"]) if pd.notna(rb.get("RAM")) else 0,
+            float(rb["SAPS"]) if pd.notna(rb.get("SAPS")) and rb.get("SAPS", 0) > 0 else 0,
+        ]
+        max_vals = [max(a, b) or 1 for a, b in zip(specs_a, specs_b)]
+        norm_a = [v / m * 100 for v, m in zip(specs_a, max_vals)]
+        norm_b = [v / m * 100 for v, m in zip(specs_b, max_vals)]
+
+        fig_specs = go.Figure()
+        fig_specs.add_trace(go.Bar(
+            name=f"Instance A — {type_a}", x=specs_labels, y=specs_a,
+            marker_color="#636EFA",
+            text=[f"{v:,.0f}" for v in specs_a], textposition="outside"
+        ))
+        fig_specs.add_trace(go.Bar(
+            name=f"Instance B — {type_b}", x=specs_labels, y=specs_b,
+            marker_color="#EF553B",
+            text=[f"{v:,.0f}" for v in specs_b], textposition="outside"
+        ))
+        fig_specs.update_layout(barmode="group", title="Comparaison des spécifications techniques",
+                                height=420, legend=dict(orientation="h"))
+        st.plotly_chart(fig_specs, width="stretch")
+
+        cat_radar = ["vCPU", "RAM", "SAPS", "Coût/h inv."]
+        cph_a = ra.get(cost_col) or 0.0001
+        cph_b = rb.get(cost_col) or 0.0001
+        max_cost = max(cph_a, cph_b)
+        radar_a = norm_a + [(1 - cph_a/max_cost)*100]
+        radar_b = norm_b + [(1 - cph_b/max_cost)*100]
+
+        fig_rad = go.Figure()
+        for vals, name, color in [
+            (radar_a, f"A — {type_a}", "#636EFA"),
+            (radar_b, f"B — {type_b}", "#EF553B"),
+        ]:
+            closed = vals + [vals[0]]
+            cats = cat_radar + [cat_radar[0]]
+            fig_rad.add_trace(go.Scatterpolar(
+                r=closed, theta=cats, fill="toself", name=name,
+                line_color=color, opacity=0.7
+            ))
+        fig_rad.update_layout(
+            polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+            title="Radar specs normalisées (100 = meilleur de la paire)",
+            height=450, showlegend=True
+        )
+        st.plotly_chart(fig_rad, width="stretch")
+
+    with tab4:
+        st.markdown("Visualisez à partir de quel mois une instance devient moins coûteuse que l'autre.")
+        diff_monthly = [tco_a_monthly[i] - tco_b_monthly[i] for i in range(len(months))]
+
+        crossover = None
+        for i in range(1, len(diff_monthly)):
+            if diff_monthly[i-1] * diff_monthly[i] <= 0 and diff_monthly[i-1] != diff_monthly[i]:
+                crossover = months[i]
+                break
+
+        fig_diff = go.Figure()
+        colors_diff = ["#636EFA" if d <= 0 else "#EF553B" for d in diff_monthly]
+        fig_diff.add_trace(go.Bar(
+            x=months, y=diff_monthly,
+            marker_color=colors_diff,
+            name="Différence TCO (A − B)",
+            hovertemplate="Mois %{x}<br>Diff: $%{y:,.0f}<extra></extra>"
+        ))
+        fig_diff.add_hline(y=0, line_color="black", line_width=1.5)
+        if crossover:
+            fig_diff.add_vline(x=crossover, line_dash="dash", line_color="green",
+                               annotation_text=f"Croisement mois {crossover}",
+                               annotation_position="top left")
+        fig_diff.update_layout(
+            title="Différence de TCO cumulé mois par mois (A − B) — bleu = A moins cher, rouge = B moins cher",
+            xaxis_title="Mois", yaxis_title="Différence ($)",
+            height=430, showlegend=False
+        )
+        for yr_m, label in [(12, "1 an"), (24, "2 ans"), (36, "3 ans")]:
+            fig_diff.add_vline(x=yr_m, line_dash="dot", line_color="lightgray",
+                               annotation_text=label, annotation_position="top right")
+        st.plotly_chart(fig_diff, width="stretch")
+
+        if crossover:
+            winner_before = "B" if diff_monthly[crossover-1] > 0 else "A"
+            winner_after = "A" if winner_before == "B" else "B"
+            st.info(f"🔀 **Point de croisement au mois {crossover}** : Instance **{winner_before}** est moins chère avant, "
+                    f"Instance **{winner_after}** devient moins chère après.")
+        else:
+            if diff_monthly[-1] < 0:
+                st.info("✅ **Instance A** reste moins chère sur toute la période de 3 ans.")
+            else:
+                st.info("✅ **Instance B** reste moins chère sur toute la période de 3 ans.")
+
+    # ── Tableau TCO complet ────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📋 Tableau TCO détaillé")
+
+    tco_table = pd.DataFrame({
+        "Période": ["1 an", "2 ans", "3 ans"],
+        "A — EC2 ($)": [f"${tco_a1['ec2']:,.0f}", f"${tco_a2['ec2']:,.0f}", f"${tco_a3['ec2']:,.0f}"],
+        "A — EBS ($)": [f"${tco_a1['ebs']:,.0f}", f"${tco_a2['ebs']:,.0f}", f"${tco_a3['ebs']:,.0f}"],
+        "A — S3 ($)": [f"${tco_a1['s3']:,.0f}", f"${tco_a2['s3']:,.0f}", f"${tco_a3['s3']:,.0f}"],
+        "A — Transfert ($)": [f"${tco_a1['transfer']:,.0f}", f"${tco_a2['transfer']:,.0f}", f"${tco_a3['transfer']:,.0f}"],
+        "A — TOTAL ($)": [f"${tco_a1['total']:,.0f}", f"${tco_a2['total']:,.0f}", f"${tco_a3['total']:,.0f}"],
+        "B — EC2 ($)": [f"${tco_b1['ec2']:,.0f}", f"${tco_b2['ec2']:,.0f}", f"${tco_b3['ec2']:,.0f}"],
+        "B — EBS ($)": [f"${tco_b1['ebs']:,.0f}", f"${tco_b2['ebs']:,.0f}", f"${tco_b3['ebs']:,.0f}"],
+        "B — S3 ($)": [f"${tco_b1['s3']:,.0f}", f"${tco_b2['s3']:,.0f}", f"${tco_b3['s3']:,.0f}"],
+        "B — Transfert ($)": [f"${tco_b1['transfer']:,.0f}", f"${tco_b2['transfer']:,.0f}", f"${tco_b3['transfer']:,.0f}"],
+        "B — TOTAL ($)": [f"${tco_b1['total']:,.0f}", f"${tco_b2['total']:,.0f}", f"${tco_b3['total']:,.0f}"],
+        "Δ Économie ($)": [
+            f"${abs(tco_a1['total']-tco_b1['total']):,.0f} {'→A' if tco_a1['total']<tco_b1['total'] else '→B'}",
+            f"${abs(tco_a2['total']-tco_b2['total']):,.0f} {'→A' if tco_a2['total']<tco_b2['total'] else '→B'}",
+            f"${abs(tco_a3['total']-tco_b3['total']):,.0f} {'→A' if tco_a3['total']<tco_b3['total'] else '→B'}",
+        ],
+    })
+    st.dataframe(tco_table, width="stretch", hide_index=True)
+
+    # ── Export Excel TCO ───────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📥 Exporter la comparaison TCO")
+
+    def build_tco_excel(ra, rb, tcos_a, tcos_b, params):
+        wb = openpyxl.Workbook()
+        HDR_FILL = PatternFill("solid", fgColor="232F3E")
+        HDR_FONT = Font(bold=True, color="FFFFFF", size=11)
+        ORANGE = PatternFill("solid", fgColor="FF9900")
+        BLUE_F = PatternFill("solid", fgColor="DCE6F1")
+        RED_F = PatternFill("solid", fgColor="FCE4D6")
+        BORDER = Border(
+            left=Side(style="thin", color="CCCCCC"), right=Side(style="thin", color="CCCCCC"),
+            top=Side(style="thin", color="CCCCCC"), bottom=Side(style="thin", color="CCCCCC"),
+        )
+        CENTER = Alignment(horizontal="center", vertical="center")
+
+        ws = wb.active
+        ws.title = "TCO Comparaison"
+
+        ws.merge_cells("A1:M1")
+        h = ws["A1"]
+        h.value = f"⚖️  Comparaison TCO — {ra['Ec2Type']} vs {rb['Ec2Type']}"
+        h.font = Font(bold=True, size=13, color="FFFFFF")
+        h.fill = ORANGE
+        h.alignment = CENTER
+        ws.row_dimensions[1].height = 26
+
+        ws.merge_cells("A2:M2")
+        s = ws["A2"]
+        s.value = (f"Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}  |  "
+                   f"{params['nb']} instance(s)  |  {params['usage']}% utilisation  |  "
+                   f"Engagement : {params['engagement']}  |  "
+                   f"EBS : {params['ebs']} Go/inst.  |  S3 : {params['s3']} To  |  Transfert : {params['transfer']} Go/mois")
+        s.font = Font(italic=True, size=8, color="555555")
+        s.alignment = Alignment(horizontal="left", vertical="center")
+        ws.row_dimensions[2].height = 16
+
+        headers = ["Période", "A — EC2", "A — EBS", "A — S3", "A — Transfert", "A — TOTAL",
+                   "B — EC2", "B — EBS", "B — S3", "B — Transfert", "B — TOTAL", "Δ ($)", "Gagnant"]
+        for ci, hdr in enumerate(headers, 1):
+            c = ws.cell(row=4, column=ci, value=hdr)
+            c.font = HDR_FONT; c.fill = HDR_FILL; c.alignment = CENTER; c.border = BORDER
+        ws.row_dimensions[4].height = 18
+
+        periods = [("1 an", tcos_a[0], tcos_b[0]), ("2 ans", tcos_a[1], tcos_b[1]), ("3 ans", tcos_a[2], tcos_b[2])]
+        for ri, (label, ta, tb) in enumerate(periods, 5):
+            winner = "A" if ta["total"] <= tb["total"] else "B"
+            row_vals = [
+                label, ta["ec2"], ta["ebs"], ta["s3"], ta["transfer"], ta["total"],
+                tb["ec2"], tb["ebs"], tb["s3"], tb["transfer"], tb["total"],
+                abs(ta["total"] - tb["total"]), f"Instance {winner}"
+            ]
+            for ci, val in enumerate(row_vals, 1):
+                c = ws.cell(row=ri, column=ci, value=val)
+                c.border = BORDER; c.alignment = CENTER
+                if ci in (1,): c.font = Font(bold=True)
+                if ci in range(2, 7): c.fill = BLUE_F
+                if ci in range(7, 12): c.fill = RED_F
+                if isinstance(val, float): c.number_format = '#,##0.00 "$"'
+            ws.row_dimensions[ri].height = 15
+
+        col_ws = [10, 14, 14, 14, 16, 16, 14, 14, 14, 16, 16, 14, 14]
+        for i, w in enumerate(col_ws, 1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+
+        ws2 = wb.create_sheet("Évolution mensuelle")
+        ws2.merge_cells("A1:C1")
+        h2 = ws2["A1"]
+        h2.value = "Évolution TCO mensuelle (36 mois)"
+        h2.font = Font(bold=True, size=12, color="FFFFFF")
+        h2.fill = HDR_FILL; h2.alignment = CENTER
+        ws2.row_dimensions[1].height = 22
+        for ci, hdr in enumerate(["Mois", f"TCO A — {ra['Ec2Type']} ($)", f"TCO B — {rb['Ec2Type']} ($)"], 1):
+            c = ws2.cell(row=3, column=ci, value=hdr)
+            c.font = HDR_FONT; c.fill = HDR_FILL; c.alignment = CENTER; c.border = BORDER
+        ws2.row_dimensions[3].height = 16
+        for m in range(1, 37):
+            ta_m = tco_for(ra, m/12)["total"]
+            tb_m = tco_for(rb, m/12)["total"]
+            for ci, val in enumerate([m, ta_m, tb_m], 1):
+                c = ws2.cell(row=m+3, column=ci, value=val)
+                c.border = BORDER; c.alignment = CENTER
+                if ci in (2, 3): c.number_format = '#,##0.00 "$"'
+                if ci == 2: c.fill = BLUE_F
+                if ci == 3: c.fill = RED_F
+            ws2.row_dimensions[m+3].height = 14
+        for i, w in enumerate([8, 28, 28], 1):
+            ws2.column_dimensions[get_column_letter(i)].width = w
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf.read()
+
+    tco_excel = build_tco_excel(
+        ra, rb,
+        [tco_a1, tco_a2, tco_a3],
+        [tco_b1, tco_b2, tco_b3],
+        {"nb": nb_instances, "usage": usage_pct, "engagement": engagement,
+         "ebs": ebs_vol_gb, "s3": s3_vol_tb, "transfer": transfer_gb}
+    )
+    fname_tco = f"tco_comparaison_{type_a}_vs_{type_b}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+    col_dl1, col_dl2 = st.columns([1, 3])
+    with col_dl1:
+        st.download_button(
+            label="📊 Télécharger TCO Excel",
+            data=tco_excel,
+            file_name=fname_tco,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+        st.caption("2 onglets : TCO par période · Évolution mensuelle 36 mois")
+    with col_dl2:
+        st.info(f"💡 Modifiez les sélections d'instances ou les paramètres TCO en haut de page — "
+                f"tous les graphiques et l'export se recalculent automatiquement.")
