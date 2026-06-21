@@ -85,6 +85,7 @@ with st.sidebar:
             "🗄️ Coûts S3 & EBS",
             "🎯 Recommandations",
             "⚖️ Comparaison TCO",
+            "🧮 Panier d'instances",
         ],
         label_visibility="collapsed"
     )
@@ -1707,3 +1708,324 @@ elif page == "⚖️ Comparaison TCO":
     with col_dl2:
         st.info(f"💡 Modifiez les sélections d'instances ou les paramètres TCO en haut de page — "
                 f"tous les graphiques et l'export se recalculent automatiquement.")
+
+
+elif page == "🧮 Panier d'instances":
+    st.title("🧮 Panier d'instances EC2")
+    st.markdown("Constituez votre liste d'instances, visualisez instantanément les coûts cumulés par type et par région.")
+    st.markdown("---")
+
+    # ── État du panier dans la session ────────────────────────────────────
+    if "panier" not in st.session_state:
+        st.session_state.panier = []
+
+    # ── Formulaire d'ajout ────────────────────────────────────────────────
+    st.subheader("➕ Ajouter une ligne au panier")
+    with st.form("form_panier", clear_on_submit=True):
+        fc1, fc2, fc3, fc4, fc5 = st.columns([3, 2, 3, 2, 1])
+        with fc1:
+            form_region = st.selectbox("Région", sorted(df["Region Name"].unique()), key="f_reg")
+        with fc2:
+            os_opts = sorted(df[df["Region Name"] == st.session_state.get("f_reg",
+                             sorted(df["Region Name"].unique())[0])]["OS"].dropna().unique())
+            form_os = st.selectbox("OS", sorted(df["OS"].dropna().unique()), key="f_os")
+        with fc3:
+            types_dispo = sorted(df["Ec2Type"].dropna().unique())
+            form_type = st.selectbox("Type EC2", types_dispo, key="f_type")
+        with fc4:
+            form_nb = st.number_input("Quantité", min_value=1, max_value=10000, value=1, step=1, key="f_nb")
+        with fc5:
+            form_engagement = st.selectbox("Engagement", ["OD", "1an", "3ans", "SP"], key="f_eng")
+        submitted = st.form_submit_button("➕ Ajouter", use_container_width=True)
+
+    if submitted:
+        eng_col = {"OD": "ODH", "1an": "CostH1yr", "3ans": "CostH3yr", "SP": "SavingsPlanH"}[form_engagement]
+        match = df[(df["Region Name"] == form_region) & (df["OS"] == form_os) & (df["Ec2Type"] == form_type)]
+        if not match.empty:
+            row = match.iloc[0]
+            cph = float(row.get(eng_col) or row.get("ODH") or 0)
+            st.session_state.panier.append({
+                "Région": form_region,
+                "OS": form_os,
+                "Type EC2": form_type,
+                "Quantité": int(form_nb),
+                "Engagement": form_engagement,
+                "$/h unit.": cph,
+                "$/h total": cph * form_nb,
+                "$/mois total": cph * form_nb * 730,
+                "$/an total": cph * form_nb * 8760,
+                "vCPU unit.": int(row.get("CPU") or 0),
+                "RAM unit. (Go)": float(row.get("RAM") or 0),
+            })
+        else:
+            st.warning("Combinaison région / OS / type introuvable dans les données.")
+
+    # ── Tableau du panier ─────────────────────────────────────────────────
+    if st.session_state.panier:
+        panier_df = pd.DataFrame(st.session_state.panier)
+
+        # boutons de gestion
+        g1, g2, g3 = st.columns([1, 1, 4])
+        with g1:
+            if st.button("🗑️ Vider le panier", use_container_width=True):
+                st.session_state.panier = []
+                st.rerun()
+        with g2:
+            if st.button("🗑️ Supprimer dernière ligne", use_container_width=True):
+                st.session_state.panier.pop()
+                st.rerun()
+
+        st.markdown("---")
+
+        # ── Histogrammes ──────────────────────────────────────────────────
+        st.subheader("📊 Coûts cumulés du panier")
+
+        tab_h1, tab_h2, tab_h3 = st.tabs(["Par type EC2", "Par région", "Par engagement"])
+
+        with tab_h1:
+            agg_type = (
+                panier_df.groupby("Type EC2")
+                .agg(
+                    nb_total=("Quantité", "sum"),
+                    cout_mois=("$/mois total", "sum"),
+                    cout_an=("$/an total", "sum"),
+                )
+                .reset_index()
+                .sort_values("cout_mois", ascending=False)
+            )
+            fig_type = go.Figure()
+            fig_type.add_trace(go.Bar(
+                x=agg_type["Type EC2"],
+                y=agg_type["cout_mois"],
+                name="$/mois",
+                marker_color="#636EFA",
+                text=[f"${v:,.0f}" for v in agg_type["cout_mois"]],
+                textposition="outside",
+                hovertemplate="<b>%{x}</b><br>$/mois : $%{y:,.2f}<br>Nb instances : %{customdata}<extra></extra>",
+                customdata=agg_type["nb_total"],
+            ))
+            fig_type.add_trace(go.Bar(
+                x=agg_type["Type EC2"],
+                y=agg_type["cout_an"],
+                name="$/an",
+                marker_color="#EF553B",
+                text=[f"${v:,.0f}" for v in agg_type["cout_an"]],
+                textposition="outside",
+                hovertemplate="<b>%{x}</b><br>$/an : $%{y:,.2f}<extra></extra>",
+                visible="legendonly",
+            ))
+            fig_type.update_layout(
+                title="Coût mensuel & annuel cumulé par type d'instance EC2",
+                xaxis_title="Type EC2",
+                yaxis_title="Coût ($)",
+                barmode="group",
+                height=450,
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            )
+            st.plotly_chart(fig_type, width="stretch")
+
+        with tab_h2:
+            agg_reg = (
+                panier_df.groupby("Région")
+                .agg(
+                    nb_total=("Quantité", "sum"),
+                    cout_mois=("$/mois total", "sum"),
+                    cout_an=("$/an total", "sum"),
+                )
+                .reset_index()
+                .sort_values("cout_mois", ascending=False)
+            )
+            fig_reg = px.bar(
+                agg_reg,
+                x="Région",
+                y="cout_mois",
+                color="Région",
+                text=agg_reg["cout_mois"].apply(lambda v: f"${v:,.0f}"),
+                title="Coût mensuel cumulé par région",
+                labels={"cout_mois": "$/mois", "Région": "Région"},
+                color_discrete_sequence=px.colors.qualitative.Set2,
+            )
+            fig_reg.update_traces(textposition="outside")
+            fig_reg.update_layout(height=430, showlegend=False)
+            st.plotly_chart(fig_reg, width="stretch")
+
+        with tab_h3:
+            agg_eng = (
+                panier_df.groupby("Engagement")
+                .agg(
+                    nb_total=("Quantité", "sum"),
+                    cout_mois=("$/mois total", "sum"),
+                )
+                .reset_index()
+            )
+            eng_labels = {"OD": "On-Demand", "1an": "Reserved 1 an", "3ans": "Reserved 3 ans", "SP": "Savings Plan"}
+            agg_eng["Engagement Label"] = agg_eng["Engagement"].map(eng_labels)
+            fig_eng = px.pie(
+                agg_eng,
+                values="cout_mois",
+                names="Engagement Label",
+                title="Répartition du coût mensuel par type d'engagement",
+                hole=0.4,
+                color_discrete_sequence=px.colors.qualitative.Pastel,
+            )
+            fig_eng.update_layout(height=400)
+            st.plotly_chart(fig_eng, width="stretch")
+
+        # ── Métriques totales ─────────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("💰 Totaux du panier")
+        tot_inst = int(panier_df["Quantité"].sum())
+        tot_mois = panier_df["$/mois total"].sum()
+        tot_an   = panier_df["$/an total"].sum()
+        tot_cpu  = int((panier_df["vCPU unit."] * panier_df["Quantité"]).sum())
+        tot_ram  = (panier_df["RAM unit. (Go)"] * panier_df["Quantité"]).sum()
+
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Instances totales", f"{tot_inst:,}")
+        m2.metric("Coût mensuel total", f"${tot_mois:,.2f}")
+        m3.metric("Coût annuel total",  f"${tot_an:,.2f}")
+        m4.metric("vCPU totaux",        f"{tot_cpu:,}")
+        m5.metric("RAM totale",         f"{tot_ram:,.0f} Go")
+
+        # ── Tableau détaillé ─────────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("📋 Détail du panier")
+        display_panier = panier_df[[
+            "Région", "Type EC2", "OS", "Engagement",
+            "Quantité", "vCPU unit.", "RAM unit. (Go)",
+            "$/h unit.", "$/h total", "$/mois total", "$/an total",
+        ]].copy()
+        st.dataframe(
+            display_panier.style.format({
+                "$/h unit.":    "${:.4f}",
+                "$/h total":    "${:.4f}",
+                "$/mois total": "${:,.2f}",
+                "$/an total":   "${:,.2f}",
+            }),
+            width="stretch",
+            hide_index=True,
+        )
+
+        # ── Export Excel panier ───────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("📥 Exporter le panier")
+
+        def build_panier_excel(detail_df, agg_type_df, agg_reg_df, totaux):
+            wb = openpyxl.Workbook()
+            HDR_FILL   = PatternFill("solid", fgColor="232F3E")
+            HDR_FONT   = Font(bold=True, color="FFFFFF", size=11)
+            ORANGE     = PatternFill("solid", fgColor="FF9900")
+            ALT        = PatternFill("solid", fgColor="F8F9FA")
+            BORDER     = Border(
+                left=Side(style="thin", color="CCCCCC"),
+                right=Side(style="thin", color="CCCCCC"),
+                top=Side(style="thin", color="CCCCCC"),
+                bottom=Side(style="thin", color="CCCCCC"),
+            )
+            CENTER = Alignment(horizontal="center", vertical="center")
+
+            # Feuille 1 — Détail
+            ws1 = wb.active
+            ws1.title = "Détail du panier"
+            ws1.merge_cells("A1:K1")
+            h = ws1["A1"]
+            h.value = f"🧮  Panier d'instances EC2 — généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}"
+            h.font = Font(bold=True, size=13, color="FFFFFF")
+            h.fill = ORANGE
+            h.alignment = CENTER
+            ws1.row_dimensions[1].height = 26
+
+            cols_d = list(detail_df.columns)
+            for ci, hdr in enumerate(cols_d, 1):
+                c = ws1.cell(row=3, column=ci, value=hdr)
+                c.font = HDR_FONT; c.fill = HDR_FILL; c.alignment = CENTER; c.border = BORDER
+            ws1.row_dimensions[3].height = 18
+
+            money_cols = {"$/h unit.", "$/h total", "$/mois total", "$/an total"}
+            for ri, row_d in detail_df.iterrows():
+                er = ri + 4
+                fill = ALT if ri % 2 else PatternFill("solid", fgColor="FFFFFF")
+                for ci, (col_n, val) in enumerate(zip(cols_d, row_d), 1):
+                    c = ws1.cell(row=er, column=ci, value=val)
+                    c.border = BORDER; c.alignment = CENTER; c.fill = fill
+                    if col_n in money_cols and isinstance(val, float):
+                        c.number_format = '#,##0.0000 "$"' if "h" in col_n else '#,##0.00 "$"'
+                ws1.row_dimensions[er].height = 15
+
+            # ligne totaux
+            tot_row = len(detail_df) + 4
+            ws1.cell(row=tot_row, column=1, value="TOTAL").font = Font(bold=True)
+            ws1.cell(row=tot_row, column=5, value=totaux["inst"]).font = Font(bold=True)
+            ws1.cell(row=tot_row, column=9, value=totaux["h_total"]).number_format = '#,##0.0000 "$"'
+            ws1.cell(row=tot_row, column=10, value=totaux["mois"]).number_format = '#,##0.00 "$"'
+            ws1.cell(row=tot_row, column=11, value=totaux["an"]).number_format = '#,##0.00 "$"'
+            for ci in range(1, 12):
+                ws1.cell(row=tot_row, column=ci).fill = PatternFill("solid", fgColor="FFF3CD")
+                ws1.cell(row=tot_row, column=ci).border = BORDER
+            ws1.row_dimensions[tot_row].height = 17
+
+            col_widths_d = [30, 20, 10, 10, 10, 12, 16, 14, 14, 16, 16]
+            for i, w in enumerate(col_widths_d, 1):
+                ws1.column_dimensions[get_column_letter(i)].width = w
+
+            # Feuille 2 — Par type
+            ws2 = wb.create_sheet("Par type EC2")
+            for ci, hdr in enumerate(["Type EC2", "Nb instances", "$/mois", "$/an"], 1):
+                c = ws2.cell(row=1, column=ci, value=hdr)
+                c.font = HDR_FONT; c.fill = HDR_FILL; c.alignment = CENTER; c.border = BORDER
+            for ri, row_t in agg_type_df.iterrows():
+                fill = ALT if ri % 2 else PatternFill("solid", fgColor="FFFFFF")
+                for ci, val in enumerate([row_t["Type EC2"], row_t["nb_total"], row_t["cout_mois"], row_t["cout_an"]], 1):
+                    c = ws2.cell(row=ri+2, column=ci, value=val)
+                    c.border = BORDER; c.alignment = CENTER; c.fill = fill
+                    if ci in (3, 4): c.number_format = '#,##0.00 "$"'
+            for i, w in enumerate([22, 14, 16, 16], 1):
+                ws2.column_dimensions[get_column_letter(i)].width = w
+
+            # Feuille 3 — Par région
+            ws3 = wb.create_sheet("Par région")
+            for ci, hdr in enumerate(["Région", "Nb instances", "$/mois", "$/an"], 1):
+                c = ws3.cell(row=1, column=ci, value=hdr)
+                c.font = HDR_FONT; c.fill = HDR_FILL; c.alignment = CENTER; c.border = BORDER
+            for ri, row_r in agg_reg_df.iterrows():
+                fill = ALT if ri % 2 else PatternFill("solid", fgColor="FFFFFF")
+                for ci, val in enumerate([row_r["Région"], row_r["nb_total"], row_r["cout_mois"], row_r["cout_an"]], 1):
+                    c = ws3.cell(row=ri+2, column=ci, value=val)
+                    c.border = BORDER; c.alignment = CENTER; c.fill = fill
+                    if ci in (3, 4): c.number_format = '#,##0.00 "$"'
+            for i, w in enumerate([32, 14, 16, 16], 1):
+                ws3.column_dimensions[get_column_letter(i)].width = w
+
+            buf = io.BytesIO()
+            wb.save(buf)
+            buf.seek(0)
+            return buf.read()
+
+        panier_excel = build_panier_excel(
+            display_panier,
+            agg_type,
+            agg_reg,
+            {
+                "inst":    tot_inst,
+                "h_total": panier_df["$/h total"].sum(),
+                "mois":    tot_mois,
+                "an":      tot_an,
+            }
+        )
+        fname_panier = f"panier_ec2_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        col_ex1, col_ex2 = st.columns([1, 3])
+        with col_ex1:
+            st.download_button(
+                label="📊 Télécharger le panier Excel",
+                data=panier_excel,
+                file_name=fname_panier,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+            st.caption("3 onglets : Détail · Par type · Par région")
+        with col_ex2:
+            st.info("💡 Le panier est conservé pendant toute votre session. Utilisez **Vider le panier** pour repartir de zéro.")
+
+    else:
+        st.info("Le panier est vide. Utilisez le formulaire ci-dessus pour ajouter des instances.")
